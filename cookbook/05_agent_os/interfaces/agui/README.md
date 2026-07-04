@@ -12,6 +12,7 @@ Examples for `interfaces/agui` in AgentOS.
 - `research_team.py` — Research Team.
 - `state_events.py` — Outbound state synchronization via STATE_SNAPSHOT + STATE_DELTA events.
 - `structured_output.py` — Structured Output.
+- `workflow_progress.py` — Native AG-UI workflow progress via STATE (`workflow_progress.steps`) + STEP.
 
 ## Prerequisites
 - Load environment variables with `direnv allow` (requires `.envrc`).
