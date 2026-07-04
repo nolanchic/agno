@@ -633,7 +633,7 @@ async def test_step_started_appends_running_entry_and_emits_step_started():
         )
     )
     assert any(e.type == ET.STEP_STARTED and e.step_name == "research" for e in events)
-    assert _steps(events) == [{"name": "research", "status": "running", "step_index": 0, "output": None}]
+    assert _steps(events) == [{"id": None, "name": "research", "status": "running", "output": None}]
 
 
 @pytest.mark.asyncio
@@ -651,16 +651,23 @@ async def test_step_completed_flips_to_completed_with_output_and_step_finished()
 
 
 @pytest.mark.asyncio
-async def test_step_output_sets_output_without_step_finished():
+async def test_step_output_alone_no_longer_sets_output_step_completed_does():
+    # step_output carries no step_id -> the bridge no longer handles it: on its own it sets nothing
+    # ("lonely" stays output-less, swept to skipped). step_completed (real step_id) is the sole
+    # output-setter. STEP 0 confirmed the real engine always emits step_completed right after
+    # step_output with the same content, so no real output is lost.
     events = await _collect(
         _stream(
-            StepStartedEvent(step_name="s", step_index=0),
-            StepOutputEvent(step_name="s", step_index=0, step_output=StepOutput(content="partial")),
+            StepStartedEvent(step_name="lonely"),
+            StepOutputEvent(step_name="lonely", step_output=StepOutput(content="partial")),
+            StepStartedEvent(step_name="done", step_id="id_d"),
+            StepCompletedEvent(step_name="done", step_id="id_d", content="final"),
             WorkflowCompletedEvent(content=None, workflow_name="wf"),
         )
     )
-    assert _steps(events)[0]["output"] == "partial"
-    assert not any(e.type == ET.STEP_FINISHED for e in events)
+    by_name = {s["name"]: s for s in _steps(events)}
+    assert by_name["lonely"]["output"] is None  # step_output alone set nothing (was "partial" before)
+    assert by_name["done"]["output"] == "final"  # step_completed populated it
 
 
 @pytest.mark.asyncio
@@ -676,6 +683,25 @@ async def test_step_error_sets_error_status_not_run_error():
     assert _steps(events)[0]["output"] == "boom"
     assert any(e.type == ET.STEP_FINISHED for e in events)
     assert not any(e.type == ET.RUN_ERROR for e in events)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_siblings_attribute_to_their_own_step_by_step_id():
+    # nested-parallel: siblings SHARE one step_index ((0, 0)) but have distinct step_id. The bridge
+    # keys on step_id, not the shared index, so interleaved start/start/finish/finish attribute each
+    # completion to its OWN step -- index-keying would cross-attribute via most-recent-open.
+    events = await _collect(
+        _stream(
+            StepStartedEvent(step_name="a", step_index=(0, 0), step_id="id_a"),
+            StepStartedEvent(step_name="b", step_index=(0, 0), step_id="id_b"),
+            StepCompletedEvent(step_name="a", step_index=(0, 0), step_id="id_a", content="a-out"),
+            StepCompletedEvent(step_name="b", step_index=(0, 0), step_id="id_b", content="b-out"),
+            WorkflowCompletedEvent(content=None, workflow_name="wf"),
+        )
+    )
+    by_name = {s["name"]: s for s in _steps(events)}
+    assert by_name["a"]["output"] == "a-out"
+    assert by_name["b"]["output"] == "b-out"
 
 
 @pytest.mark.asyncio
@@ -821,6 +847,22 @@ def _stub_step(name):
     return Step(name=name, agent=Agent(name=name, model=_StubModel(id="stub")))
 
 
+def _echo(name):
+    # Executor step with a DISTINCT output per name, so parallel siblings have distinguishable
+    # outputs and cross-attribution (were step_id keying to regress) is detectable rather than
+    # masked by identical stub content. The await yields the event loop so concurrent siblings
+    # interleave (both start before either completes) -- reproducing the shared-step_index collision.
+    import asyncio
+
+    from agno.workflow.step import Step
+
+    async def run(step_input, **kwargs):
+        await asyncio.sleep(0)
+        return StepOutput(content="%s-out" % name)
+
+    return Step(name=name, executor=run)
+
+
 @pytest.mark.parametrize("shape", ["loop", "parallel", "condition", "router", "nested"])
 @pytest.mark.asyncio
 async def test_real_engine_container_populates_flat_steps(shape):
@@ -834,7 +876,7 @@ async def test_real_engine_container_populates_flat_steps(shape):
     if shape == "loop":
         steps = [Loop(steps=[s("ls")], max_iterations=2, name="loop")]
     elif shape == "parallel":
-        steps = [Parallel(s("p1"), s("p2"), name="par")]
+        steps = [Parallel(_echo("p1"), _echo("p2"), name="par")]
     elif shape == "condition":
         steps = [Condition(name="cond", evaluator=lambda *a, **k: True, steps=[s("cs")])]
     elif shape == "router":
@@ -856,7 +898,14 @@ async def test_real_engine_container_populates_flat_steps(shape):
     assert raw_structural == []
     steps_out = _steps(events)
     assert len(steps_out) >= 1  # inner steps populate the flat list
-    assert all(set(st.keys()) == {"name", "status", "step_index", "output"} for st in steps_out)
+    assert all(set(st.keys()) == {"id", "name", "status", "output"} for st in steps_out)
+    if shape == "parallel":
+        # Option A's linchpin: siblings share a step_index but must EACH land their OWN completion,
+        # keyed by a distinct step_id. Distinct executor outputs make cross-attribution detectable --
+        # if keying regressed to the shared index, the outputs would swap.
+        by_name = {st["name"]: st for st in steps_out}
+        assert by_name["p1"]["output"] == "p1-out"
+        assert by_name["p2"]["output"] == "p2-out"
 
 
 # ---- pulled-forward (flag #1): DB-backed workflow keeps progress in the final snapshot ----
