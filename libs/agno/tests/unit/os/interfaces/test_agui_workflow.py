@@ -43,8 +43,10 @@ from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.workflow import (
     WORKFLOW_RUN_EVENT_TYPE_REGISTRY,
     StepCompletedEvent,
+    StepContinuedEvent,
     StepErrorEvent,
     StepOutputEvent,
+    StepPausedEvent,
     StepStartedEvent,
     WorkflowCancelledEvent,
     WorkflowCompletedEvent,
@@ -629,11 +631,15 @@ async def test_step_started_appends_running_entry_and_emits_step_started():
     events = await _collect(
         _stream(
             StepStartedEvent(step_name="research", step_index=0),
+            StepCompletedEvent(step_name="research", step_index=0, content="done"),
             WorkflowCompletedEvent(content=None, workflow_name="wf"),
         )
     )
     assert any(e.type == ET.STEP_STARTED and e.step_name == "research" for e in events)
-    assert _steps(events) == [{"id": None, "name": "research", "status": "running", "output": None}]
+    # step_started appends the entry (id/name) and emits STEP_STARTED; driven to completion so the
+    # terminal snapshot is stable. A lone step with no terminal event surfaces as "skipped" instead
+    # -- covered by the skipped test below.
+    assert _steps(events) == [{"id": None, "name": "research", "status": "completed", "output": "done"}]
 
 
 @pytest.mark.asyncio
@@ -702,6 +708,49 @@ async def test_concurrent_siblings_attribute_to_their_own_step_by_step_id():
     by_name = {s["name"]: s for s in _steps(events)}
     assert by_name["a"]["output"] == "a-out"
     assert by_name["b"]["output"] == "b-out"
+
+
+@pytest.mark.asyncio
+async def test_step_pause_and_continue_flip_the_entry_status():
+    # _PAUSE_STEP flips a live step running->paused; _CONTINUE flips it paused->running. Both are
+    # keyed by step_id. Asserted via the terminal sweep, which distinguishes them: a paused step
+    # survives completion as "paused", while a continued (running) step is swept to "skipped" --
+    # so the two outcomes differ only if each branch actually mutated its entry.
+    paused = await _collect(
+        _stream(
+            StepStartedEvent(step_name="s", step_id="id_s"),
+            StepPausedEvent(step_name="s", step_id="id_s"),
+            WorkflowCompletedEvent(content=None, workflow_name="wf"),
+        )
+    )
+    assert _steps(paused)[0]["status"] == "paused"  # _PAUSE_STEP ran; the sweep leaves paused alone
+    continued = await _collect(
+        _stream(
+            StepStartedEvent(step_name="s", step_id="id_s"),
+            StepPausedEvent(step_name="s", step_id="id_s"),
+            StepContinuedEvent(step_name="s", step_id="id_s"),
+            WorkflowCompletedEvent(content=None, workflow_name="wf"),
+        )
+    )
+    assert _steps(continued)[0]["status"] == "skipped"  # _CONTINUE ran (paused->running); swept to skipped
+
+
+@pytest.mark.asyncio
+async def test_skipped_step_surfaces_as_skipped_not_stuck_running():
+    # A step skipped via on_error=skip emits step_started but no terminal event -> without the
+    # completion sweep it is frozen on "running" in a COMPLETED run. It must surface as "skipped"
+    # (and the sweep must not touch genuinely-completed steps).
+    events = await _collect(
+        _stream(
+            StepStartedEvent(step_name="ok", step_index=0),
+            StepCompletedEvent(step_name="ok", step_index=0, content="done"),
+            StepStartedEvent(step_name="boom", step_index=1),
+            WorkflowCompletedEvent(content=None, workflow_name="wf"),
+        )
+    )
+    by_name = {s["name"]: s for s in _steps(events)}
+    assert by_name["ok"]["status"] == "completed"
+    assert by_name["boom"]["status"] == "skipped"
 
 
 @pytest.mark.asyncio

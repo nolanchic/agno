@@ -92,11 +92,19 @@ def _open_step(steps: List[Dict[str, Any]], step_id: Optional[str]) -> Optional[
 
 
 def mark_completed(state: StreamState) -> None:
-    """Promote a still-running workflow to 'completed' at terminal time. Never clobbers a
-    'cancelled' / 'error' / 'paused' status already set by a structural event."""
+    """Promote a still-running workflow to 'completed' at terminal time (never clobbering a
+    'cancelled' / 'error' / 'paused' status already set by a structural event). A step skipped
+    via on_error=skip emits no terminal event, so in a COMPLETED run any leftover 'running' step
+    was skipped -- surface it as 'skipped' instead of leaving it stuck on 'running'."""
     progress = state.workflow_progress
-    if progress is not None and progress.get("status") == RunStatus.running.value:
+    if progress is None:
+        return
+    if progress.get("status") == RunStatus.running.value:
         progress["status"] = RunStatus.completed.value
+    if progress.get("status") == RunStatus.completed.value:
+        for step in progress["steps"]:
+            if step["status"] == "running":
+                step["status"] = "skipped"
 
 
 def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
