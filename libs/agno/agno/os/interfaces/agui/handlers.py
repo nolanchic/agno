@@ -25,6 +25,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 
+from agno.models.response import ToolExecution
 from agno.os.interfaces.agui import workflow_handlers, workflow_progress
 from agno.os.interfaces.agui.state import StreamState
 from agno.reasoning.step import ReasoningStep
@@ -337,74 +338,85 @@ def _close_open_streams(state: StreamState) -> List[BaseEvent]:
     return events
 
 
+def _paused_tools_for(chunk: BaseRunOutputEvent) -> List[ToolExecution]:
+    """Tools to surface as TOOL_CALL_* events for a paused run. Pause-type selection seam:
+    main emits Agent external-execution tools only; new pause types add their partition here."""
+    from agno.run.agent import RunPausedEvent
+
+    if isinstance(chunk, RunPausedEvent):
+        return chunk.tools_awaiting_external_execution
+    return []
+
+
 def _finalize_run(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     """Emit external-execution tool calls for paused runs, the final state snapshot, and RUN_FINISHED."""
     events: List[BaseEvent] = []
 
-    # Emit external execution tools for paused runs
-    from agno.run.agent import RunPausedEvent
+    # Emit tool calls for paused runs
+    paused_tools = _paused_tools_for(chunk)
+    if paused_tools:
+        assistant_message_id = str(uuid.uuid4())
+        events.append(
+            TextMessageStartEvent(
+                type=EventType.TEXT_MESSAGE_START,
+                message_id=assistant_message_id,
+                role="assistant",
+            )
+        )
 
-    if isinstance(chunk, RunPausedEvent):
-        external_tools = chunk.tools_awaiting_external_execution
-        if external_tools:
-            assistant_message_id = str(uuid.uuid4())
+        content = getattr(chunk, "content", None)
+        if content:
+            state.streamed_any_text = True
             events.append(
-                TextMessageStartEvent(
-                    type=EventType.TEXT_MESSAGE_START,
+                TextMessageContentEvent(
+                    type=EventType.TEXT_MESSAGE_CONTENT,
                     message_id=assistant_message_id,
-                    role="assistant",
+                    delta=str(content),
                 )
             )
 
-            content = getattr(chunk, "content", None)
-            if content:
-                state.streamed_any_text = True
-                events.append(
-                    TextMessageContentEvent(
-                        type=EventType.TEXT_MESSAGE_CONTENT,
-                        message_id=assistant_message_id,
-                        delta=str(content),
-                    )
+        events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=assistant_message_id))
+
+        for tool in paused_tools:
+            if tool.tool_call_id is None or tool.tool_name is None:
+                continue
+
+            events.append(
+                ToolCallStartEvent(
+                    type=EventType.TOOL_CALL_START,
+                    tool_call_id=tool.tool_call_id,
+                    tool_call_name=tool.tool_name,
+                    parent_message_id=assistant_message_id,
                 )
+            )
 
-            events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=assistant_message_id))
-
-            for tool in external_tools:
-                if tool.tool_call_id is None or tool.tool_name is None:
-                    continue
-
-                events.append(
-                    ToolCallStartEvent(
-                        type=EventType.TOOL_CALL_START,
-                        tool_call_id=tool.tool_call_id,
-                        tool_call_name=tool.tool_name,
-                        parent_message_id=assistant_message_id,
-                    )
+            events.append(
+                ToolCallArgsEvent(
+                    type=EventType.TOOL_CALL_ARGS,
+                    tool_call_id=tool.tool_call_id,
+                    delta=json.dumps(tool.tool_args),
                 )
+            )
 
-                events.append(
-                    ToolCallArgsEvent(
-                        type=EventType.TOOL_CALL_ARGS,
-                        tool_call_id=tool.tool_call_id,
-                        delta=json.dumps(tool.tool_args),
-                    )
-                )
+            events.append(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tool.tool_call_id))
 
-                events.append(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tool.tool_call_id))
-
-    # Emit final state snapshot
-    if state.run_state is not None:
-        authoritative_state = getattr(chunk, "session_state", None)
-        final_state = authoritative_state if authoritative_state is not None else state.run_state
-        # workflow_progress is transient: stripped from session_state before the DB save, and the
-        # engine's authoritative session_state may not carry it. Re-inject the tracked progress so
-        # the final snapshot doesn't blank the steps the deltas already rendered.
-        if state.workflow_progress is not None:
-            final_state = {**final_state, "workflow_progress": state.workflow_progress}
-        events.append(StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(final_state)))
-
+    # Emit final state snapshot, then close the run.
+    events += _final_snapshot(chunk, state)
     events.append(RunFinishedEvent(type=EventType.RUN_FINISHED, thread_id=state.thread_id, run_id=state.run_id))
     return events
+
+
+def _final_snapshot(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
+    """Terminal STATE_SNAPSHOT that re-injects the tracked workflow_progress (stripped from
+    session_state before the DB save, so the engine's authoritative session_state may not
+    carry it) -- else the final snapshot would blank the steps the deltas already rendered."""
+    if state.run_state is None:
+        return []
+    authoritative_state = getattr(chunk, "session_state", None)
+    final_state = authoritative_state if authoritative_state is not None else state.run_state
+    if state.workflow_progress is not None:
+        final_state = {**final_state, "workflow_progress": state.workflow_progress}
+    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(final_state))]
 
 
 def on_run_completed(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
