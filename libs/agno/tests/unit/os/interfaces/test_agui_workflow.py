@@ -727,7 +727,7 @@ async def test_workflow_cancelled_sets_status_not_custom():
     assert not any(e.type == ET.CUSTOM for e in events)
     assert not any(e.type == ET.RUN_ERROR for e in events)
     assert any(e.type == ET.RUN_FINISHED for e in events)
-    assert _wf_status(events) == "cancelled"
+    assert _wf_status(events) == "CANCELLED"
 
 
 @pytest.mark.asyncio
@@ -746,7 +746,7 @@ async def test_cancel_reason_not_rendered_as_answer():
     deltas = _deltas(events)
     assert "partial answer so far" in deltas
     assert reason not in deltas
-    assert _wf_status(events) == "cancelled"
+    assert _wf_status(events) == "CANCELLED"
     assert not any(e.type == ET.RUN_ERROR for e in events)
 
 
@@ -755,7 +755,7 @@ async def test_workflow_paused_sets_status_not_custom():
     events = await _collect(_stream(WorkflowPausedEvent(workflow_name="wf")))
     assert not any(e.type == ET.CUSTOM for e in events)
     assert not any(e.type == ET.RUN_ERROR for e in events)
-    assert _wf_status(events) == "paused"
+    assert _wf_status(events) == "PAUSED"
     assert any(e.type == ET.RUN_FINISHED for e in events)
 
 
@@ -790,7 +790,7 @@ async def test_final_snapshot_status_completed_and_steps_survive():
             WorkflowCompletedEvent(content=None, workflow_name="wf"),
         )
     )
-    assert _wf_status(events) == "completed"
+    assert _wf_status(events) == "COMPLETED"
     assert _steps(events)[0]["name"] == "s"
     assert _steps(events)[0]["status"] == "completed"
 

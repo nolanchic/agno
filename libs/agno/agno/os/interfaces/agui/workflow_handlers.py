@@ -2,11 +2,11 @@
 
 A streaming workflow re-emits its inner agent/team events (content, tool calls,
 reasoning), which the standard handlers already translate — so this module only
-covers what is workflow-specific: identifying the structural events (routed to
-CustomEvents via on_custom_event in handlers.py) and resolving the terminal
-events (completed / error) at completion time. Cancellation is intentionally
-NOT terminal here: it mirrors the agent/team path (a non-error marker surfaced
-as a CustomEvent, plus a clean RUN_FINISHED).
+covers what is workflow-specific: identifying the structural events (routed to the
+native STATE workflow_progress handler in handlers.py) and resolving the terminal
+events (completed / error) at completion time. Cancellation is intentionally NOT
+terminal here: it surfaces as a STATE status ("cancelled") and the run finalizes
+cleanly with a RUN_FINISHED.
 """
 
 import json
@@ -28,8 +28,8 @@ from agno.run.workflow import WorkflowRunEvent
 from agno.workflow.types import StepType
 
 # Terminal workflow events that the stream gate routes to process_completion.
-# workflow_cancelled is deliberately excluded — it is surfaced as a structural
-# CustomEvent and the run finalizes cleanly, matching the agent/team path.
+# workflow_cancelled is deliberately excluded — it surfaces as a STATE status
+# ("cancelled") via progress_handler and the run finalizes cleanly.
 _WORKFLOW_TERMINAL_VALUES = frozenset(
     {
         WorkflowRunEvent.workflow_completed.value,
@@ -37,8 +37,10 @@ _WORKFLOW_TERMINAL_VALUES = frozenset(
     }
 )
 
-# Every other WorkflowRunEvent value — surfaced to clients as CustomEvents so
-# the workflow's structure (steps, routers, loops, ...) carries through as data.
+# Every other WorkflowRunEvent value — routed to the native STATE workflow_progress
+# handler (progress_handler in handlers.py), which projects the workflow's structure
+# (steps, routers, loops, ...) into shared STATE. custom_event is re-excluded there so
+# the author's own event keeps its CustomEvent passthrough.
 STRUCTURAL_EVENT_VALUES = frozenset(e.value for e in WorkflowRunEvent) - _WORKFLOW_TERMINAL_VALUES
 
 

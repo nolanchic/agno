@@ -27,7 +27,7 @@ from ag_ui.core import (
 
 from agno.os.interfaces.agui.state import StreamState
 from agno.os.interfaces.agui.workflow_handlers import _event_value, _render_content
-from agno.run.base import BaseRunOutputEvent
+from agno.run.base import BaseRunOutputEvent, RunStatus
 from agno.run.workflow import WorkflowRunEvent
 
 _E = WorkflowRunEvent
@@ -36,12 +36,14 @@ _MAX_OUTPUT = 500  # cap step output stored in STATE so deltas stay small
 _PAUSE_STEP = frozenset({_E.step_paused.value, _E.step_executor_paused.value, _E.step_output_review.value})
 _PAUSE_WORKFLOW = frozenset({_E.workflow_paused.value, _E.router_paused.value})
 _CONTINUE = frozenset({_E.step_continued.value, _E.step_executor_continued.value})
+# condition_paused ("ConditionPaused") is intentionally absent: it is a vestigial enum
+# value in agno core with no event class, never emitted -- so it needs no handling here.
 
 
 def _progress(state: StreamState) -> dict:
     if state.run_state is None:
         state.run_state = {}
-    return state.run_state.setdefault("workflow_progress", {"status": "running", "steps": []})
+    return state.run_state.setdefault("workflow_progress", {"status": RunStatus.running.value, "steps": []})
 
 
 def _baseline(state: StreamState) -> List[BaseEvent]:
@@ -84,8 +86,8 @@ def mark_completed(state: StreamState) -> None:
     """Promote a still-running workflow to 'completed' at terminal time. Never clobbers a
     'cancelled' / 'error' / 'paused' status already set by a structural event."""
     progress = state.workflow_progress
-    if progress is not None and progress.get("status") == "running":
-        progress["status"] = "completed"
+    if progress is not None and progress.get("status") == RunStatus.running.value:
+        progress["status"] = RunStatus.completed.value
 
 
 def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
@@ -124,13 +126,13 @@ def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
         if step is not None:
             step["status"] = "paused"
     elif value in _PAUSE_WORKFLOW:
-        progress["status"] = "paused"
+        progress["status"] = RunStatus.paused.value
     elif value in _CONTINUE:
         step = _open_step(steps, index)
         if step is not None:
             step["status"] = "running"
     elif value == _E.workflow_cancelled.value:
-        progress["status"] = "cancelled"
+        progress["status"] = RunStatus.cancelled.value
         state.cancelled = True
     # workflow_started initialises progress above; container/agent events are no-ops
     # (their inner step_started/completed populate the flat list).
