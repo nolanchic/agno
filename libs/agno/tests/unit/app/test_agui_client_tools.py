@@ -3,10 +3,10 @@ from ag_ui.core.types import ToolMessage, UserMessage
 
 from agno.models.response import ToolExecution
 from agno.os.interfaces.agui.input import (
-    agui_tools_to_external_functions,
     extract_tool_messages,
-    merge_tool_results_into_requirements,
+    parse_client_tools,
 )
+from agno.os.interfaces.agui.resume import apply_tool_results_to_requirements
 from agno.os.interfaces.agui.utils import to_json_str
 from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
@@ -90,15 +90,15 @@ def test_extract_tool_messages_empty_content():
     assert result[0].content == ""
 
 
-# agui_tools_to_external_functions tests
+# parse_client_tools tests
 
 
-def test_agui_tools_to_external_functions_empty():
-    assert agui_tools_to_external_functions(None) == []
-    assert agui_tools_to_external_functions([]) == []
+def test_parse_client_tools_empty():
+    assert parse_client_tools(None) == []
+    assert parse_client_tools([]) == []
 
 
-def test_agui_tools_to_external_functions_converts():
+def test_parse_client_tools_converts():
     agui_tools = [
         AGUITool(
             name="change_background",
@@ -111,7 +111,7 @@ def test_agui_tools_to_external_functions_converts():
         ),
     ]
 
-    result = agui_tools_to_external_functions(agui_tools)
+    result = parse_client_tools(agui_tools)
 
     assert len(result) == 2
     assert all(isinstance(f, Function) for f in result)
@@ -132,7 +132,7 @@ def test_agui_tools_all_have_external_execution():
         AGUITool(name="tool_2", description="Second"),
         AGUITool(name="tool_3", description="Third"),
     ]
-    result = agui_tools_to_external_functions(agui_tools)
+    result = parse_client_tools(agui_tools)
 
     for func in result:
         assert func.external_execution is True
@@ -142,7 +142,7 @@ def test_agui_tools_all_have_external_execution():
 def test_agui_tools_no_entrypoint():
     # Frontend tools execute in browser, not server - no entrypoint
     agui_tools = [AGUITool(name="browser_tool", description="Runs in browser")]
-    result = agui_tools_to_external_functions(agui_tools)
+    result = parse_client_tools(agui_tools)
 
     assert result[0].entrypoint is None
 
@@ -150,7 +150,7 @@ def test_agui_tools_no_entrypoint():
 def test_agui_tools_empty_description():
     # AGUITool requires description, test with empty string
     agui_tools = [AGUITool(name="no_desc", description="")]
-    result = agui_tools_to_external_functions(agui_tools)
+    result = parse_client_tools(agui_tools)
 
     assert result[0].name == "no_desc"
     assert result[0].description == ""
@@ -171,7 +171,7 @@ def test_agui_tools_preserves_complex_schema():
         "required": ["name"],
     }
     agui_tools = [AGUITool(name="complex", description="Complex tool", parameters=complex_params)]
-    result = agui_tools_to_external_functions(agui_tools)
+    result = parse_client_tools(agui_tools)
 
     assert result[0].parameters == complex_params
 
@@ -182,7 +182,7 @@ def test_agui_tools_preserves_order():
         AGUITool(name="beta", description="Second"),
         AGUITool(name="gamma", description="Third"),
     ]
-    result = agui_tools_to_external_functions(agui_tools)
+    result = parse_client_tools(agui_tools)
 
     assert [f.name for f in result] == ["alpha", "beta", "gamma"]
 
@@ -236,10 +236,10 @@ def test_to_json_str_empty_list():
     assert to_json_str("[]") == "[]"
 
 
-# merge_tool_results_into_requirements tests
+# apply_tool_results_to_requirements tests
 
 
-def test_merge_tool_results_basic():
+def test_apply_tool_results_basic():
     """Test basic merging of tool results into requirements."""
     stored_requirements = [
         RunRequirement(
@@ -253,14 +253,14 @@ def test_merge_tool_results_basic():
     ]
     tool_messages = [ToolMessage(id="t1", tool_call_id="call_1", content="Background changed to blue")]
 
-    result = merge_tool_results_into_requirements(stored_requirements, tool_messages)
+    result = apply_tool_results_to_requirements(stored_requirements, tool_messages)
 
     assert len(result) == 1
     assert result[0].tool_execution.result == "Background changed to blue"
     assert result[0].external_execution_result == "Background changed to blue"
 
 
-def test_merge_tool_results_multiple():
+def test_apply_tool_results_multiple():
     """Test merging multiple tool results."""
     stored_requirements = [
         RunRequirement(
@@ -285,13 +285,13 @@ def test_merge_tool_results_multiple():
         ToolMessage(id="t2", tool_call_id="call_2", content="result_b"),
     ]
 
-    result = merge_tool_results_into_requirements(stored_requirements, tool_messages)
+    result = apply_tool_results_to_requirements(stored_requirements, tool_messages)
 
     assert result[0].tool_execution.result == "result_a"
     assert result[1].tool_execution.result == "result_b"
 
 
-def test_merge_tool_results_with_error():
+def test_apply_tool_results_with_error():
     """Test merging tool results when tool returned an error."""
     stored_requirements = [
         RunRequirement(
@@ -305,13 +305,13 @@ def test_merge_tool_results_with_error():
     ]
     tool_messages = [ToolMessage(id="t1", tool_call_id="call_1", content="", error="Something went wrong")]
 
-    result = merge_tool_results_into_requirements(stored_requirements, tool_messages)
+    result = apply_tool_results_to_requirements(stored_requirements, tool_messages)
 
     assert result[0].tool_execution.tool_call_error is True
     assert result[0].tool_execution.result == "Something went wrong"
 
 
-def test_merge_tool_results_no_match():
+def test_apply_tool_results_no_match():
     """Test that unmatched requirements are unchanged."""
     stored_requirements = [
         RunRequirement(
@@ -325,14 +325,14 @@ def test_merge_tool_results_no_match():
     ]
     tool_messages = [ToolMessage(id="t1", tool_call_id="call_other", content="result")]
 
-    result = merge_tool_results_into_requirements(stored_requirements, tool_messages)
+    result = apply_tool_results_to_requirements(stored_requirements, tool_messages)
 
     assert result[0].tool_execution.result is None
 
 
-def test_merge_tool_results_empty_inputs():
+def test_apply_tool_results_empty_inputs():
     """Test with empty inputs."""
-    assert merge_tool_results_into_requirements([], []) == []
+    assert apply_tool_results_to_requirements([], []) == []
 
     stored = [
         RunRequirement(
@@ -343,5 +343,5 @@ def test_merge_tool_results_empty_inputs():
             )
         )
     ]
-    result = merge_tool_results_into_requirements(stored, [])
+    result = apply_tool_results_to_requirements(stored, [])
     assert result[0].tool_execution.result is None

@@ -4,8 +4,41 @@ from ag_ui.core.types import ToolMessage as AGUIToolMessage
 
 from agno.agent import Agent
 from agno.os.interfaces.agui.input import ensure_requirements_resolved, merge_tool_results_into_requirements
-from agno.run.base import RunContext
+from agno.run.base import RunContext, RunStatus
+from agno.run.requirement import RunRequirement
+from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 from agno.team.team import Team
+
+
+def apply_tool_results_to_requirements(
+    requirements: List[RunRequirement],
+    tool_messages: List[AGUIToolMessage],
+) -> List[RunRequirement]:
+    """Apply external execution results from frontend ToolMessages to paused requirements.
+
+    This is the simple path for external_execution tools only (client_tools). For HITL tools
+    (confirmation, user_input, user_feedback), use merge_tool_results_into_requirements instead.
+    """
+    results_map = {tm.tool_call_id: (tm.content, getattr(tm, "error", None)) for tm in tool_messages}
+
+    for req in requirements:
+        if not req.tool_execution or not req.tool_execution.tool_call_id:
+            continue
+        tool_call_id = req.tool_execution.tool_call_id
+        if tool_call_id not in results_map:
+            continue
+
+        content, error = results_map[tool_call_id]
+        if error:
+            req.set_external_execution_result(str(error))
+            if req.tool_execution:
+                req.tool_execution.tool_call_error = True
+        else:
+            req.set_external_execution_result(content)
+
+    return requirements
 
 
 async def resume_paused_run(
@@ -16,14 +49,14 @@ async def resume_paused_run(
     run_kwargs: dict,
 ):
     # Remote entities don't support client_tools resume (no aget_session)
+    if not isinstance(entity, (Agent, Team)):
+        raise ValueError(
+            "Frontend tool resume requires a local Agent or Team. RemoteAgent/RemoteTeam are not supported."
+        )
     if not getattr(entity, "db", None):
         raise ValueError(
             "Frontend tool resume requires a database. Set db=SqliteDb(...) or db=PgDb(...) on your Agent/Team."
         )
-
-    from agno.run.base import RunStatus
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
 
     session = await entity.aget_session(session_id=session_id)
     if not session:
@@ -34,8 +67,6 @@ async def resume_paused_run(
     # Find the paused run (AG-UI sends new run_id on resume, so we find by status). A Team's session
     # also holds paused member RunOutputs (agent_id, no team_id); resume the top-level TeamRunOutput,
     # never a member run (whose missing team_id crashes core on continue). Agent path is unchanged.
-    from agno.run.team import TeamRunOutput
-
     if isinstance(entity, Team):
         paused_run = next(
             (r for r in (session.runs or []) if r.status == RunStatus.paused and isinstance(r, TeamRunOutput)),
@@ -52,7 +83,7 @@ async def resume_paused_run(
     if not paused_run.requirements:
         raise ValueError(f"Run {paused_run.run_id} has no requirements to resume")
 
-    # Merge tool results; refuse a partial multi-tool answer (an unanswered tool would be silently rejected at dispatch).
+    # Merge tool results by pause_type; refuse partial multi-tool answers
     requirements = merge_tool_results_into_requirements(paused_run.requirements, tool_messages)
     ensure_requirements_resolved(requirements)
 

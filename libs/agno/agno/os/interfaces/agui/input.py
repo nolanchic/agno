@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import base64
 import json
 import urllib.request
 from dataclasses import asdict, is_dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ag_ui.core.types import Message as AGUIMessage
 from ag_ui.core.types import Tool as AGUITool
@@ -10,9 +12,11 @@ from ag_ui.core.types import ToolMessage as AGUIToolMessage
 from pydantic import BaseModel
 
 from agno.media import Audio, File, Image, Video
-from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
 from agno.utils.log import log_warning
+
+if TYPE_CHECKING:
+    from agno.run.requirement import RunRequirement
 
 
 def extract_user_input(messages: List[AGUIMessage]) -> str:
@@ -169,7 +173,7 @@ def extract_tool_messages(messages: List[AGUIMessage]) -> List[AGUIToolMessage]:
     return list(reversed(tool_msgs))
 
 
-def agui_tools_to_external_functions(agui_tools: Optional[List[AGUITool]]) -> List[Function]:
+def parse_client_tools(agui_tools: Optional[List[AGUITool]]) -> List[Function]:
     # Frontend tools run in the browser; external_execution=True pauses the run
     if not agui_tools:
         return []
@@ -197,9 +201,9 @@ def _parse_payload(content: Any) -> Dict[str, Any]:
 
 
 def merge_tool_results_into_requirements(
-    stored_requirements: List[RunRequirement],
+    stored_requirements: "List[RunRequirement]",
     tool_messages: List[AGUIToolMessage],
-) -> List[RunRequirement]:
+) -> "List[RunRequirement]":
     """Resolve each paused requirement from its matching inbound ToolMessage, BY pause_type.
 
     ToolMessage.content is a developer-defined JSON string (AG-UI defines no HITL payload
@@ -207,6 +211,7 @@ def merge_tool_results_into_requirements(
     tool_call_id; the branch is chosen by the STORED requirement's pause_type, never the payload:
       - confirmation:       {"accepted": <bool>}   (optional "note")
       - user_input:         {"values": {<field>: <value>, ...}}   (required; a non-dict "values" raises)
+      - user_feedback:      {"selections": {<question>: [<labels>]}}
       - external_execution: the raw result string, passed through unchanged
 
     Crucially, confirmation/user_input set confirmed/answered (NOT result) so agno runs the
@@ -221,8 +226,8 @@ def merge_tool_results_into_requirements(
         content, error = results_map[te.tool_call_id]
         data = _parse_payload(content)
         pause_type = req.pause_type
-        # Each pause_type resolves via its own core method (below). An unknown pause_type falls
-        # through unresolved and ensure_requirements_resolved raises on it (fail-loud, never a silent skip).
+        # Each pause_type resolves via its own core method. An unknown pause_type falls through
+        # unresolved and ensure_requirements_resolved raises on it (fail-loud, never a silent skip).
         if pause_type == "external_execution":
             if error:
                 te.tool_call_error = True
@@ -245,7 +250,7 @@ def merge_tool_results_into_requirements(
     return stored_requirements
 
 
-def ensure_requirements_resolved(requirements: List[RunRequirement]) -> None:
+def ensure_requirements_resolved(requirements: "List[RunRequirement]") -> None:
     """Raise if any paused requirement is left unresolved (a partial multi-tool answer).
 
     On a multi-tool pause the frontend may answer only some tools; merge_tool_results_into_requirements

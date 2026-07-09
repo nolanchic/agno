@@ -23,7 +23,7 @@ from agno.agent.agent import Agent
 from agno.models.response import ToolExecution, UserInputField
 from agno.os.interfaces.agui.handlers import on_run_completed
 from agno.os.interfaces.agui.input import (
-    agui_tools_to_external_functions,
+    parse_client_tools,
     ensure_requirements_resolved,
     merge_tool_results_into_requirements,
 )
@@ -233,7 +233,7 @@ class TestDedupe:
         def send_email(to: str, subject: str, body: str) -> str:
             return f"Email sent to {to}"
 
-        client_tools = agui_tools_to_external_functions(
+        client_tools = parse_client_tools(
             [
                 AGUITool(
                     name="send_email",
